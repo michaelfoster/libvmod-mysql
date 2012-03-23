@@ -23,7 +23,7 @@ varnish v1 -vcl+backend {
 	}
 	sub vcl_deliver {
 		set resp.http.test = mysql.col("test");
-		set resp.http.test2 = mysql.col("1");
+		set resp.http.test2 = mysql.col("0");
 		set resp.http.err = mysql.error();
 
 		mysql.free_result();
