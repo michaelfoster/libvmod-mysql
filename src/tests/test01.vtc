@@ -1,0 +1,41 @@
+varnishtest "Test MySQL vmod"
+
+server s1 {
+       rxreq
+       txresp
+} -start
+
+varnish v1 -vcl+backend {
+	import mysql from "${vmod_topbuild}/src/.libs/libvmod_mysql.so";
+
+	sub vcl_init {
+		if(!mysql.connect("localhost", "root", "root", "")) {
+			
+		}
+	}
+	sub vcl_recv {
+		if(!mysql.query("SELECT " + mysql.escape("Hello, world!") + " as `test`")) {
+			error 500 "SQL error";
+		}
+		if(!mysql.fetch()) {
+			error 500 "mysql.fetch() failed!";
+		}
+	}
+	sub vcl_deliver {
+		set resp.http.test = mysql.col("test");
+		set resp.http.test2 = mysql.col("1");
+		set resp.http.err = mysql.error();
+
+		mysql.free_result();
+	}
+} -start
+
+client c1 {
+	txreq -url "/"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.test == "Hello, world!"
+	expect resp.http.test2 == "Hello, world!"
+}
+
+client c1 -run

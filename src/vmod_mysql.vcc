@@ -1,0 +1,15 @@
+Module mysql
+Init init_function
+
+Function BOOL connect(STRING, STRING, STRING, STRING)
+Function STRING error()
+
+Function STRING escape(STRING)
+Function BOOL query(STRING)
+
+Function BOOL fetch()
+Function STRING col(STRING)
+Function INT num_rows()
+Function INT affected_rows()
+
+Function VOID free_result()
