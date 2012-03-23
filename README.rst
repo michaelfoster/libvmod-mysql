@@ -14,7 +14,7 @@ Varnish MySQL Module
 ABOUT
 =====
 
-Use scarcely or not at all.
+Use scarcely or not at all. Currently very unstable.
 
 SYNOPSIS
 ========
