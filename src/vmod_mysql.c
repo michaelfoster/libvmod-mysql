@@ -78,10 +78,10 @@ vmod_query(struct sess *sp, const char *query)
 	if(mysql_query(&vmod_mysql.handle, query) == 0) {
 		/* Query succeeded */
 		vmod_mysql.result = mysql_store_result(&vmod_mysql.handle);
-
-		vmod_mysql.num_fields = mysql_num_fields(vmod_mysql.result);
-		vmod_mysql.fields = mysql_fetch_fields(vmod_mysql.result);
-
+		if(vmod_mysql.result != NULL) {
+			vmod_mysql.num_fields = mysql_num_fields(vmod_mysql.result);
+			vmod_mysql.fields = mysql_fetch_fields(vmod_mysql.result);
+		}
 		return true;
 	} else {
 		/* Query failed */
@@ -93,7 +93,11 @@ vmod_query(struct sess *sp, const char *query)
 int
 vmod_num_rows(struct sess *sp)
 {
-	return mysql_num_rows(&vmod_mysql.handle);
+	if(vmod_mysql.result == NULL) {
+		/* Statement returned no result */
+		return 0;
+	}
+	return mysql_num_rows(vmod_mysql.result);
 }
 
 int
@@ -121,7 +125,7 @@ vmod_escape(struct sess *sp, const char *string) {
 unsigned
 vmod_connect(struct sess *sp, const char *host, const char *user, const char *password, const char *database)
 {
-	return mysql_real_connect(&vmod_mysql.handle, host, user, password, database, 0, NULL, 0);
+	return mysql_real_connect(&vmod_mysql.handle, host, user, password, database, 0, NULL, 0) != NULL;
 }
 
 int
