@@ -2,20 +2,68 @@
 #include <stdlib.h>
 #include <mysql/mysql.h>
 
-#include "vrt.h"
 #include "bin/varnishd/cache.h"
 
 #include "vcc_if.h"
 
 struct {
 	MYSQL handle;
+} vmod_mysql;
+
+struct vmod_mysql_res {
+	unsigned	magic;
+#define VMOD_MYSQL_MAGIC 0xBBB0C87C
 	MYSQL_RES *result;
-
 	MYSQL_ROW row;
-
+	
+	unsigned xid;
 	unsigned int num_fields;
 	MYSQL_FIELD *fields;
-} vmod_mysql;
+};
+static struct vmod_mysql_res **vmod_mysql_list;
+int vmod_mysql_list_sz;
+static pthread_mutex_t cl_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static void cm_clear(struct vmod_mysql_res *c);
+
+static void cm_init(struct vmod_mysql_res *c) {
+	c->magic = VMOD_MYSQL_MAGIC;
+	
+	cm_clear(c);
+}
+
+static void cm_clear(struct vmod_mysql_res *c) {
+	CHECK_OBJ_NOTNULL(c, VMOD_MYSQL_MAGIC);
+	
+	c->result = NULL;
+	c->row = NULL;
+	c->fields = NULL;
+	c->num_fields = 0;
+}
+
+static struct vmod_mysql_res* cm_get(struct sess *sp) {
+	struct vmod_mysql_res *cm;
+	AZ(pthread_mutex_lock(&cl_mtx));
+
+	while (vmod_mysql_list_sz <= sp->id) {
+		int ns = vmod_mysql_list_sz*2;
+		/* resize array */
+		vmod_mysql_list = realloc(vmod_mysql_list, ns * sizeof(struct vmod_mysql_res *));
+		for (; vmod_mysql_list_sz < ns; vmod_mysql_list_sz++) {
+			vmod_mysql_list[vmod_mysql_list_sz] = malloc(sizeof(struct vmod_mysql_res));
+			cm_init(vmod_mysql_list[vmod_mysql_list_sz]);
+		}
+		assert(vmod_mysql_list_sz == ns);
+		AN(vmod_mysql_list);
+	}
+	cm = vmod_mysql_list[sp->id];
+	if (cm->xid != sp->xid) {
+		cm_clear(cm);
+		cm->xid = sp->xid;
+	}
+	AZ(pthread_mutex_unlock(&cl_mtx));
+	return cm;
+}
 
 const char *
 vmod_error(struct sess *sp)
@@ -26,11 +74,14 @@ vmod_error(struct sess *sp)
 const char *
 vmod_col(struct sess *sp, const char *col_name)
 {
+	struct vmod_mysql_res *r;
 	int i;
+	
+	r = cm_get(sp);
 
-	for(i = 0; i < vmod_mysql.num_fields; i++) {
-		if(strcmp(vmod_mysql.fields[i].name, col_name) == 0) {
-			return vmod_mysql.row[i];
+	for(i = 0; i < r->num_fields; i++) {
+		if(strcmp(r->fields[i].name, col_name) == 0) {
+			return r->row[i];
 		}
 	}
 
@@ -43,49 +94,63 @@ vmod_col(struct sess *sp, const char *col_name)
 	}
 
 	i = atoi(col_name);
-	if(i < 0 || i >= vmod_mysql.num_fields) {
+	if(i < 0 || i >= r->num_fields) {
 		/* Column out of range */
 		return NULL;
 	}
 
-	return vmod_mysql.row[i];
+	return r->row[i];
 }
 
 unsigned
 vmod_fetch(struct sess *sp)
 {
-	if(vmod_mysql.result == NULL) {
+	struct vmod_mysql_res *r;
+	
+	r = cm_get(sp);
+	
+	if(r->result == NULL) {
 		/* No result */
 		return false;
 	}
 
-	vmod_mysql.row = mysql_fetch_row(vmod_mysql.result);
+	r->row = mysql_fetch_row(r->result);
 
-	return vmod_mysql.row != NULL;
+	return r->row != NULL;
 }
 
 void
 vmod_free_result(struct sess *sp)
 {
-	if(vmod_mysql.result != NULL) {
-		mysql_free_result(vmod_mysql.result);
+	struct vmod_mysql_res *r;
+	
+	r = cm_get(sp);
+	
+	if(r->result != NULL) {
+		mysql_free_result(r->result);
 	}
+	
+	cm_clear(r);
 }
 
 unsigned
 vmod_query(struct sess *sp, const char *query)
 {
+	struct vmod_mysql_res *r;
+	
+	r = cm_get(sp);
+	
 	if(mysql_query(&vmod_mysql.handle, query) == 0) {
 		/* Query succeeded */
-		vmod_mysql.result = mysql_store_result(&vmod_mysql.handle);
-		if(vmod_mysql.result != NULL) {
-			vmod_mysql.num_fields = mysql_num_fields(vmod_mysql.result);
-			vmod_mysql.fields = mysql_fetch_fields(vmod_mysql.result);
+		r->result = mysql_store_result(&vmod_mysql.handle);
+		if(r->result != NULL) {
+			r->num_fields = mysql_num_fields(r->result);
+			r->fields = mysql_fetch_fields(r->result);
 		}
 		return true;
 	} else {
 		/* Query failed */
-		vmod_mysql.result = NULL;
+		r->result = NULL;
 		return false;
 	}
 }
@@ -93,11 +158,15 @@ vmod_query(struct sess *sp, const char *query)
 int
 vmod_num_rows(struct sess *sp)
 {
-	if(vmod_mysql.result == NULL) {
+	struct vmod_mysql_res *r;
+	
+	r = cm_get(sp);
+	
+	if(r->result == NULL) {
 		/* Statement returned no result */
 		return 0;
 	}
-	return mysql_num_rows(vmod_mysql.result);
+	return mysql_num_rows(r->result);
 }
 
 int
@@ -131,7 +200,19 @@ vmod_connect(struct sess *sp, const char *host, const char *user, const char *pa
 int
 init_function(struct vmod_priv *priv, const struct VCL_conf *conf)
 {
+	int i;
+	
 	mysql_init(&vmod_mysql.handle);
-
+	
+	vmod_mysql_list_sz = 256;
+	vmod_mysql_list = malloc(sizeof(struct vmod_mysql_res *) * vmod_mysql_list_sz);
+	AN(vmod_mysql_list);
+	
+	for(i = 0; i < vmod_mysql_list_sz; i++) {
+		vmod_mysql_list[i] = malloc(sizeof(struct vmod_mysql_res));
+		cm_init(vmod_mysql_list[i]);
+	}
+	
 	return 0;
 }
+
